@@ -9,6 +9,7 @@ export type InvoiceAttachment = {
   mimeType: string
   url: string
   uploadedAt: number
+  storage?: 'local'|'s3'
 }
 
 export async function listInvoiceAttachments(invoiceId: number){
@@ -27,4 +28,14 @@ export async function uploadInvoiceAttachment(invoiceId: number, file: File){
 
 export async function deleteInvoiceAttachment(invoiceId: number, attId: number){
   await api.delete(`/invoices/${invoiceId}/attachments/${attId}`)
+}
+
+export async function presignInvoiceAttachment(invoiceId: number, filename: string, contentType: string){
+  const { data } = await api.post(`/invoices/${invoiceId}/attachments/presign`, { filename, contentType })
+  return data as { uploadUrl:string; objectUrl:string; key:string; headers?: Record<string,string> }
+}
+
+export async function recordInvoiceAttachment(invoiceId:number, info: { key:string; objectUrl:string; originalName:string; size:number; mimeType:string }){
+  const { data } = await api.post(`/invoices/${invoiceId}/attachments/record`, info)
+  return data
 }

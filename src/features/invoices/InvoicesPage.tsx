@@ -5,10 +5,10 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
 import { Box, Button, Grid, IconButton, MenuItem, Paper, TextField, Typography } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
-import AttachFileIcon from '@mui/icons-material/AttachFile'
-import InvoiceAttachmentsDialog from '@/components/InvoiceAttachmentsDialog'
 import DeleteIcon from '@mui/icons-material/Delete'
+import AttachFileIcon from '@mui/icons-material/AttachFile'
 import { Invoice, listInvoices, createInvoice, updateInvoice, deleteInvoice } from '@/services/invoices'
+import InvoiceAttachmentsDialog from '@/components/InvoiceAttachmentsDialog'
 
 const InvoiceSchema = z.object({
   number: z.string().min(1, 'Required'),
