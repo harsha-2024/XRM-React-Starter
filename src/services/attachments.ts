@@ -20,9 +20,7 @@ export async function listInvoiceAttachments(invoiceId: number){
 export async function uploadInvoiceAttachment(invoiceId: number, file: File){
   const form = new FormData()
   form.append('file', file)
-  const { data } = await api.post<InvoiceAttachment>(`/invoices/${invoiceId}/attachments`, form, {
-    headers: { 'Content-Type': 'multipart/form-data' }
-  })
+  const { data } = await api.post<InvoiceAttachment>(`/invoices/${invoiceId}/attachments`, form, { headers: { 'Content-Type': 'multipart/form-data' } })
   return data
 }
 
@@ -38,4 +36,9 @@ export async function presignInvoiceAttachment(invoiceId: number, filename: stri
 export async function recordInvoiceAttachment(invoiceId:number, info: { key:string; objectUrl:string; originalName:string; size:number; mimeType:string }){
   const { data } = await api.post(`/invoices/${invoiceId}/attachments/record`, info)
   return data
+}
+
+export async function getSignedInvoiceAttachmentUrl(invoiceId: number, attId: number){
+  const { data } = await api.get(`/invoices/${invoiceId}/attachments/${attId}/url`)
+  return data as { url: string; expiresIn: number }
 }
