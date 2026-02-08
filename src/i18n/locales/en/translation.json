@@ -1,0 +1,15 @@
+{
+  "logout": "Logout",
+  "toggleTheme": "Toggle Theme",
+  "changeLanguage": "Change Language",
+  "login": "Login",
+  "username": "Username",
+  "password": "Password",
+  "signIn": "Sign In",
+  "dashboard": "Dashboard",
+  "welcome": "Welcome to XRM",
+  "reports": "Reports",
+  "settings": "Settings",
+  "language": "Language",
+  "theme": "Theme"
+}
