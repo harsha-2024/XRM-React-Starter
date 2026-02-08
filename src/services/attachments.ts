@@ -51,7 +51,6 @@ export async function getSignedInvoiceAttachmentThumbUrl(invoiceId: number, attI
 }
 
 export function downloadInvoiceAttachment(invoiceId: number, attId: number){
-  // Navigate to server download route to get Content-Disposition
   const url = (api.defaults.baseURL || '') + `/invoices/${invoiceId}/attachments/${attId}/download`
   window.location.href = url
 }
