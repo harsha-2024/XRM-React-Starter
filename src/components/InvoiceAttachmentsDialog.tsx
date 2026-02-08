@@ -1,210 +1,120 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, List, ListItem, ListItemAvatar, Avatar, ListItemText, Typography, LinearProgress, Alert, Collapse, Stack, Chip, Tooltip } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/Delete'
+import { Dialog, DialogTitle, DialogContent, DialogActions, Button, List, ListItem, ListItemText, LinearProgress, IconButton, Typography, Chip, Stack } from '@mui/material'
 import CloudUploadIcon from '@mui/icons-material/CloudUpload'
-import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf'
-import ImageIcon from '@mui/icons-material/Image'
-import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
-import VisibilityIcon from '@mui/icons-material/Visibility'
-import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
-import CloseIcon from '@mui/icons-material/Close'
-import DownloadIcon from '@mui/icons-material/Download'
 import CancelIcon from '@mui/icons-material/Cancel'
+import PauseIcon from '@mui/icons-material/Pause'
+import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import ReplayIcon from '@mui/icons-material/Replay'
+import DownloadIcon from '@mui/icons-material/Download'
+import DeleteIcon from '@mui/icons-material/Delete'
+import {
+  InvoiceAttachment,
+  listInvoiceAttachments,
+  deleteInvoiceAttachment,
+  downloadInvoiceAttachment,
+  presignInvoiceAttachment,
+  recordInvoiceAttachment,
+  s3MultipartInitiate,
+  s3MultipartPresignPart,
+  s3MultipartComplete,
+} from '@/services/attachments'
 import api from '@/services/api'
-import { InvoiceAttachment, listInvoiceAttachments, uploadInvoiceAttachment, deleteInvoiceAttachment, presignInvoiceAttachment, recordInvoiceAttachment, getSignedInvoiceAttachmentUrl, getSignedInvoiceAttachmentThumbUrl, downloadInvoiceAttachment } from '@/services/attachments'
 
-const MAX_SIZE = 10 * 1024 * 1024
-const ALLOWED_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif']
+const MIN_PART = 5 * 1024 * 1024
+const PART_SIZE = 10 * 1024 * 1024
 
-function isImage(type:string){ return type.startsWith('image/') }
-function isPdf(type:string){ return type === 'application/pdf' }
-
-function sleep(ms:number){ return new Promise(r=>setTimeout(r, ms)) }
-function backoffDelay(attempt:number){ // exp backoff + jitter
-  const base = 400 * Math.pow(2, attempt) // 400, 800, 1600...
-  const jitter = Math.random() * 200
-  return base + jitter
-}
-
-async function putWithProgress(url: string, file: File, headers: Record<string,string> = {}, onProgress?: (loaded:number,total:number)=>void, signal?: AbortSignal){
-  let attempt = 0
-  const maxAttempts = 3
-  while(true){
-    try {
-      await api.put(url, file, {
-        headers: { ...(headers||{}), 'Content-Type': file.type },
-        onUploadProgress: (e) => { if (onProgress && e.total) onProgress(e.loaded!, e.total!) },
-        baseURL: '',
-        signal
-      })
-      return
-    } catch (err:any) {
-      if (signal?.aborted) throw err
-      if (++attempt >= maxAttempts) throw err
-      await sleep(backoffDelay(attempt))
-    }
-  }
-}
-
-async function runWithConcurrency(tasks: (()=>Promise<any>)[], limit=3){
-  const results:any[] = []; let i=0
-  const workers = new Array(Math.min(limit, tasks.length)).fill(0).map(async ()=>{ while(i<tasks.length){ const idx=i++; try{ results[idx]=await tasks[idx]() }catch(e){ results[idx]=e } } })
-  await Promise.all(workers); return results
-}
+type PartStatus = 'idle'|'uploading'|'done'|'failed'|'paused'
 
 export default function InvoiceAttachmentsDialog({ open, onClose, invoiceId }:{ open:boolean; onClose: ()=>void; invoiceId:number }){
   const [items, setItems] = useState<InvoiceAttachment[]>([])
-  const [thumbs, setThumbs] = useState<Record<number, string>>({})
-  const [selected, setSelected] = useState<{ file: File; controller?: AbortController }[]>([])
-  const [errors, setErrors] = useState<string[]>([])
-  const [busy, setBusy] = useState(false)
-  const [progressMap, setProgressMap] = useState<Record<string, {loaded:number; total:number}>>({})
-  const [itemPreviewOpen, setItemPreviewOpen] = useState<Record<number, {open:boolean; url?:string}>>({})
-  const [uploadStart, setUploadStart] = useState<number|undefined>(undefined)
+  const [files, setFiles] = useState<File[]>([])
+  const [perFileParts, setPerFileParts] = useState<Record<string, { total:number; statuses: PartStatus[]; etags: (string|undefined)[] }>>({})
+  const controllers = useRef<Record<string, AbortController>>({})
+  const [paused, setPaused] = useState<Record<string, boolean>>({})
 
-  async function refresh(){
-    const list = await listInvoiceAttachments(invoiceId)
-    setItems(list)
-    const map: Record<number,string> = {}
-    for (const att of list){
-      try{ const r = await getSignedInvoiceAttachmentThumbUrl(invoiceId, att.id); map[att.id] = r.url }catch{}
-    }
-    setThumbs(map)
-  }
+  async function refresh(){ setItems(await listInvoiceAttachments(invoiceId)) }
   useEffect(()=>{ if(open){ refresh() } }, [open, invoiceId])
 
-  function onDragOver(e: React.DragEvent<HTMLDivElement>){ e.preventDefault(); e.stopPropagation() }
-  function onDrop(e: React.DragEvent<HTMLDivElement>){ e.preventDefault(); e.stopPropagation(); const files = Array.from(e.dataTransfer.files || []); addFiles(files) }
+  function pickFiles(ev:any){ const f = Array.from(ev.target.files||[]); setFiles(prev=>[...prev, ...f]) }
 
-  function validateFile(f: File){ if (!ALLOWED_TYPES.includes(f.type)) throw new Error(`${f.name}: Only PDF and images are allowed`); if (f.size > MAX_SIZE) throw new Error(`${f.name}: File too large (max 10 MB)`) }
-  function addFiles(files: File[]){ const errs:string[]=[]; const ok:{file:File}[]=[]; files.forEach(f=>{ try{ validateFile(f); ok.push({file:f}) }catch(e:any){ errs.push(e.message||'Invalid file') } }); if(errs.length) setErrors(p=>[...p, ...errs]); if(ok.length) setSelected(p=>[...p, ...ok]) }
-  function removePendingFile(idx: number){ setSelected(prev=> prev.filter((_,i)=> i!==idx)) }
+  function splitParts(file: File){
+    const size = file.size
+    if (size <= MIN_PART) return { total: 1, ranges: [[0,size]] }
+    const total = Math.ceil(size / PART_SIZE)
+    const ranges: [number,number][] = []
+    for (let p=0;p<total;p++){ const start=p*PART_SIZE; ranges.push([start, Math.min(size, start+PART_SIZE)]) }
+    return { total, ranges }
+  }
 
-  // Overall progress & ETA
-  const overall = useMemo(()=>{
-    const totalsize = selected.reduce((s,x)=> s + x.file.size, 0)
-    const loaded = Object.entries(progressMap).reduce((s, [k, v])=> s + v.loaded, 0)
-    const pct = totalsize ? Math.round( (loaded / totalsize) * 100 ) : 0
-    const elapsed = uploadStart ? (Date.now() - uploadStart)/1000 : 0
-    const rate = elapsed>0 ? loaded / elapsed : 0 // bytes/sec
-    const remaining = totalsize - loaded
-    const eta = rate>0 ? Math.round(remaining / rate) : undefined // sec
-    return { pct, eta, rate }
-  }, [selected, progressMap, uploadStart])
+  function initFileState(file: File){ const { total } = splitParts(file); setPerFileParts(prev=> ({ ...prev, [file.name]: { total, statuses: Array(total).fill('idle'), etags: Array(total).fill(undefined) } })) }
 
-  async function uploadOne(entry: { file: File; controller?: AbortController }){
-    const { file } = entry
-    const pmKey = `${file.name}:${file.size}`
-    const controller = new AbortController()
-    entry.controller = controller
-    const setP = (loaded:number,total:number)=> setProgressMap(prev=> ({...prev,[pmKey]:{loaded,total}}))
-    setP(0,file.size)
-    try{
-      try {
-        const presign=await presignInvoiceAttachment(invoiceId, file.name, file.type)
-        await putWithProgress(presign.uploadUrl, file, presign.headers||{}, setP, controller.signal)
-        await recordInvoiceAttachment(invoiceId,{key:presign.key, objectUrl:presign.objectUrl, originalName:file.name, size:file.size, mimeType:file.type})
-      } catch (e) {
-        await uploadInvoiceAttachment(invoiceId, file)
-        setP(file.size, file.size)
+  function backoff(attempt:number){ const base = 400 * Math.pow(2, attempt); const jitter = Math.random() * 200; return base + jitter }
+
+  async function uploadSmall(file: File){ const presign = await presignInvoiceAttachment(invoiceId, file.name, file.type); const c = new AbortController(); controllers.current[file.name]=c; await api.put(presign.uploadUrl, file, { headers: presign.headers||{}, signal: c.signal, baseURL:'' }); await recordInvoiceAttachment(invoiceId, { key: presign.key, objectUrl: presign.objectUrl, originalName:file.name, size:file.size, mimeType:file.type }) }
+
+  async function uploadMultipart(file: File){ const { ranges, total } = splitParts(file); const { key, uploadId } = await s3MultipartInitiate(invoiceId, file.name, file.type)
+    const etags: { PartNumber:number; ETag:string }[] = []
+    for (let idx=0; idx<total; idx++){
+      let attempt = 0
+      let success = false
+      while(!success){
+        try{
+          if (paused[file.name]){ await new Promise(r=>setTimeout(r,300)); continue }
+          setPerFileParts(prev=>{ const p = { ...prev[file.name] }; p.statuses[idx] = 'uploading'; return { ...prev, [file.name]: p } })
+          const [start,end] = ranges[idx]; const blob = file.slice(start,end)
+          const { url, headers } = await s3MultipartPresignPart(invoiceId, key, uploadId, idx+1)
+          const c = new AbortController(); controllers.current[file.name]=c
+          const resp = await api.put(url, blob, { headers: headers||{}, signal: c.signal, baseURL:'', onUploadProgress:(e)=>{ /* per-part progress is implicit via statuses */ } })
+          const etag = (resp.headers['etag']||resp.headers['ETag']||'').replace('"','').replace('"','')
+          etags.push({ PartNumber: idx+1, ETag: etag })
+          setPerFileParts(prev=>{ const p = { ...prev[file.name] }; p.statuses[idx] = 'done'; p.etags[idx] = etag; return { ...prev, [file.name]: p } })
+          success = true
+        }catch(err){
+          setPerFileParts(prev=>{ const p = { ...prev[file.name] }; p.statuses[idx] = 'failed'; return { ...prev, [file.name]: p } })
+          attempt++; if(attempt>=3) throw err; await new Promise(r=>setTimeout(r, backoff(attempt)))
+        }
       }
-    } finally {
-      // nothing
     }
+    await s3MultipartComplete(invoiceId, key, uploadId, etags)
+    await recordInvoiceAttachment(invoiceId, { key, objectUrl: (api.defaults.baseURL||'')+`/s3/${key}`, originalName:file.name, size:file.size, mimeType:file.type })
   }
 
-  async function onUploadAll(){
-    setErrors([])
-    if(!selected.length) return
-    setBusy(true)
-    setUploadStart(Date.now())
-    setProgressMap({})
-    try{
-      const tasks = selected.map(entry=> ()=> uploadOne(entry))
-      await runWithConcurrency(tasks, 3)
-      setSelected([])
-      setProgressMap({})
-      await refresh()
-    } catch { setErrors(p=>[...p,'Some uploads failed; please retry.']) } finally { setBusy(false); setUploadStart(undefined) }
-  }
+  async function startUpload(){ for(const f of files){ initFileState(f); if (f.size <= MIN_PART){ await uploadSmall(f) } else { await uploadMultipart(f) } } setFiles([]); await refresh() }
 
-  function cancelUpload(idx:number){
-    const entry = selected[idx]
-    try{ entry.controller?.abort() }catch{}
-    removePendingFile(idx)
-  }
-
-  async function onDelete(attId:number){ setBusy(true); try{ await deleteInvoiceAttachment(invoiceId, attId); await refresh() } catch { setErrors(p=>[...p,'Delete failed']) } finally { setBusy(false) } }
-
-  async function togglePreview(att: InvoiceAttachment){ const rec=itemPreviewOpen[att.id]; if(rec?.open){ setItemPreviewOpen(p=>({...p,[att.id]:{open:false}})); return } let url=att.url; if(att.storage==='s3'){ try{ const r=await getSignedInvoiceAttachmentUrl(invoiceId, att.id); url=r.url }catch{ setErrors(p=>[...p,'Failed to get view URL']); return } } setItemPreviewOpen(p=>({...p,[att.id]:{open:true,url}})) }
-
-  function renderAvatar(att: InvoiceAttachment){ const thumb = thumbs[att.id]; if (thumb && isImage(att.mimeType)) return <Avatar variant='square' src={thumb} />; if (isImage(att.mimeType)) return <Avatar variant='square'><ImageIcon/></Avatar>; if (isPdf(att.mimeType)) return <Avatar variant='square'><PictureAsPdfIcon/></Avatar>; return <Avatar variant='square'><InsertDriveFileIcon/></Avatar> }
+  function togglePause(name:string){ setPaused(prev=> ({ ...prev, [name]: !prev[name] })) }
+  function cancel(name:string){ try{ controllers.current[name]?.abort() }catch{} }
+  function retryPart(fileName:string, idx:number){ setPerFileParts(prev=>{ const p = { ...prev[fileName] }; p.statuses[idx] = 'idle'; return { ...prev, [fileName]: p } }) }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth='md' fullWidth>
       <DialogTitle>Invoice Attachments</DialogTitle>
       <DialogContent>
-        {errors.map((e,i)=> <Alert key={i} severity='error' sx={{ mb:1 }}>{e}</Alert>)}
-        <Box onDragOver={onDragOver} onDrop={onDrop} sx={{ border:'1px dashed', borderColor:'divider', borderRadius:1, p:2, mb:2, textAlign:'center', bgcolor:'action.hover' }}>
-          <Typography variant='body2' sx={{ mb:1 }}>Drag & drop files here, or choose “Add files”.</Typography>
-          <Button component='label' variant='outlined' startIcon={<CloudUploadIcon />} disabled={busy}>Add files<input type='file' multiple accept='image/*,application/pdf' hidden onChange={(e)=> e.target.files && addFiles(Array.from(e.target.files))} /></Button>
-        </Box>
-
-        {selected.length>0 && (
-          <Box sx={{ mb:2 }}>
-            <Stack direction='row' justifyContent='space-between' alignItems='center' sx={{ mb:1 }}>
-              <Typography variant='subtitle1'>Files to upload ({selected.length})</Typography>
-              <Stack direction='row' alignItems='center' spacing={2}>
-                {uploadStart && <Typography variant='body2'>Overall: {overall.pct}%{overall.eta!==undefined?` · ETA ${overall.eta}s`:''}</Typography>}
-                <Button onClick={()=>{ setSelected([]); setProgressMap({}); setUploadStart(undefined) }} size='small' startIcon={<CloseIcon />}>Clear</Button>
-              </Stack>
-            </Stack>
-            <List dense>
-              {selected.map((entry,idx)=>{ const pmKey=`${entry.file.name}:${entry.file.size}`; const prog=(progressMap[pmKey]?.loaded||0) / (progressMap[pmKey]?.total||entry.file.size) * 100; return (
-                <ListItem key={pmKey} secondaryAction={<Tooltip title='Cancel'><IconButton edge='end' onClick={()=>cancelUpload(idx)} disabled={!busy}><CancelIcon/></IconButton></Tooltip>}>
-                  <ListItemAvatar><Avatar variant='square'>{isImage(entry.file.type)?<ImageIcon/>:isPdf(entry.file.type)?<PictureAsPdfIcon/>:<InsertDriveFileIcon/>}</Avatar></ListItemAvatar>
-                  <ListItemText primary={`${entry.file.name}`} secondary={`${(entry.file.size/1024).toFixed(1)} KB · ${entry.file.type||'unknown'}`} />
-                  {uploadStart && <Box sx={{ minWidth:200 }}><LinearProgress variant='determinate' value={isNaN(prog)?0:prog} /></Box>}
-                </ListItem>
-              )})}
-            </List>
-            <Button variant='contained' onClick={onUploadAll} disabled={busy || selected.length===0}>Upload {selected.length} file(s)</Button>
-          </Box>
-        )}
-
-        <Typography variant='subtitle1' sx={{ mb:1 }}>Existing attachments</Typography>
-        <List dense>
-          {items.map(att=>{ const pv=itemPreviewOpen[att.id]; return (
-            <Box key={att.id}>
-              <ListItem secondaryAction={<Box>
-                  <Chip size='small' label={att.storage==='s3'?'S3':'Local'} sx={{ mr:1 }} />
-                  <Tooltip title='Preview'>
-                    <IconButton sx={{ mr:1 }} onClick={()=>togglePreview(att)} disabled={busy}>{pv?.open ? <VisibilityOffIcon/> : <VisibilityIcon/>}</IconButton>
-                  </Tooltip>
-                  <Tooltip title='Download'>
-                    <IconButton sx={{ mr:1 }} onClick={()=>downloadInvoiceAttachment(invoiceId, att.id)} disabled={busy}><DownloadIcon/></IconButton>
-                  </Tooltip>
-                  <Tooltip title='Delete'>
-                    <IconButton edge='end' aria-label='delete' onClick={()=>onDelete(att.id)} disabled={busy}><DeleteIcon/></IconButton>
-                  </Tooltip>
-                </Box>}>
-                <ListItemAvatar>{renderAvatar(att)}</ListItemAvatar>
-                <ListItemText primary={<span>{att.originalName}</span>} secondary={`${(att.size/1024).toFixed(1)} KB · ${att.mimeType}`} />
+        <Button component='label' startIcon={<CloudUploadIcon />}>Add files<input type='file' hidden multiple onChange={pickFiles} /></Button>
+        <List>
+          {files.map(f=>{
+            const ps = perFileParts[f.name]
+            return (
+              <ListItem key={f.name} secondaryAction={<Stack direction='row' spacing={1}><IconButton onClick={()=>togglePause(f.name)}>{paused[f.name]?<PlayArrowIcon/>:<PauseIcon/>}</IconButton><IconButton onClick={()=>cancel(f.name)}><CancelIcon/></IconButton></Stack>}>
+                <ListItemText primary={`${f.name}`} secondary={`${(f.size/1024/1024).toFixed(1)} MB`} />
               </ListItem>
-              <Collapse in={!!pv?.open} timeout='auto' unmountOnExit>
-                <Box sx={{ p:1, borderTop:'1px solid', borderColor:'divider', mb:1 }}>
-                  {pv?.url && isImage(att.mimeType) && (<img src={pv.url} alt={att.originalName} style={{ maxWidth:'100%', maxHeight:480, borderRadius:4 }} />)}
-                  {pv?.url && isPdf(att.mimeType) && (<iframe title={`pdf-${att.id}`} src={pv.url} style={{ width:'100%', height:520, border:'1px solid #eee', borderRadius:4 }} />)}
-                  {!isImage(att.mimeType) && !isPdf(att.mimeType) && pv?.url && (<Typography variant='body2'><a href={pv.url} target='_blank' rel='noreferrer'>Open file</a></Typography>)}
-                </Box>
-              </Collapse>
-            </Box>
-          )})}
-          {items.length===0 && <Typography variant='body2' color='text.secondary'>No attachments yet.</Typography>}
+            )
+          })}
+        </List>
+        {files.length>0 && <Button variant='contained' onClick={startUpload}>Upload {files.length} file(s)</Button>}
+
+        <Typography variant='h6' sx={{ mt:3 }}>Existing</Typography>
+        <List>
+          {items.map(att=> (
+            <ListItem key={att.id} secondaryAction={<Stack direction='row' spacing={1}><Chip label={att.processing?'processing':'ready'} color={att.processing?'warning':'success'} /><IconButton onClick={()=>downloadInvoiceAttachment(invoiceId, att.id)}><DownloadIcon/></IconButton><IconButton onClick={()=>deleteInvoiceAttachment(invoiceId, att.id)}><DeleteIcon/></IconButton></Stack>}>
+              <ListItemText primary={att.originalName} secondary={`${(att.size/1024).toFixed(1)} KB · ${att.mimeType}`} />
+            </ListItem>
+          ))}
         </List>
       </DialogContent>
-      <DialogActions><Button onClick={onClose} disabled={busy}>Close</Button></DialogActions>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+      </DialogActions>
     </Dialog>
   )
 }

@@ -1,20 +1,17 @@
 
-import { useMemo, useState } from 'react'
-import { ThemeProvider, createTheme, CssBaseline } from '@mui/material'
-import { Routes, Route, Navigate } from 'react-router-dom'
-import InvoicesPage from './features/invoices/InvoicesPage'
+import { useState } from 'react'
+import { ThemeProvider, createTheme, CssBaseline, Container, Button } from '@mui/material'
+import InvoiceAttachmentsDialog from './components/InvoiceAttachmentsDialog'
 
 export default function App(){
-  const [mode, setMode] = useState<'light'|'dark'>('light')
-  const theme = useMemo(()=> createTheme({ palette: { mode } }), [mode])
+  const [open, setOpen] = useState(true)
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={createTheme({ palette:{ mode:'light' } })}>
       <CssBaseline />
-      <Routes>
-        <Route path="/" element={<Navigate to="/invoices" />} />
-        <Route path="/invoices" element={<InvoicesPage />} />
-        <Route path="*" element={<Navigate to="/invoices" />} />
-      </Routes>
+      <Container sx={{ py:4 }}>
+        <Button variant='contained' onClick={()=>setOpen(true)}>Open Attachments</Button>
+        <InvoiceAttachmentsDialog open={open} onClose={()=>setOpen(false)} invoiceId={1} />
+      </Container>
     </ThemeProvider>
   )
 }
