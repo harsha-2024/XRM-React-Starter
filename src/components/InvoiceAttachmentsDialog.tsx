@@ -1,6 +1,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, List, ListItem, ListItemAvatar, Avatar, ListItemText, Typography, LinearProgress, Alert, Collapse, Stack, Chip } from '@mui/material'
+import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, List, ListItem, ListItemAvatar, Avatar, ListItemText, Typography, LinearProgress, Alert, Collapse, Stack, Chip, Tooltip } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
 import CloudUploadIcon from '@mui/icons-material/CloudUpload'
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf'
@@ -9,8 +9,9 @@ import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import VisibilityIcon from '@mui/icons-material/Visibility'
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff'
 import CloseIcon from '@mui/icons-material/Close'
+import DownloadIcon from '@mui/icons-material/Download'
 import api from '@/services/api'
-import { InvoiceAttachment, listInvoiceAttachments, uploadInvoiceAttachment, deleteInvoiceAttachment, presignInvoiceAttachment, recordInvoiceAttachment, getSignedInvoiceAttachmentUrl } from '@/services/attachments'
+import { InvoiceAttachment, listInvoiceAttachments, uploadInvoiceAttachment, deleteInvoiceAttachment, presignInvoiceAttachment, recordInvoiceAttachment, getSignedInvoiceAttachmentUrl, getSignedInvoiceAttachmentThumbUrl, downloadInvoiceAttachment } from '@/services/attachments'
 
 const MAX_SIZE = 10 * 1024 * 1024
 const ALLOWED_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/gif']
@@ -32,15 +33,28 @@ async function runWithConcurrency(tasks: (()=>Promise<any>)[], limit=3){
 
 export default function InvoiceAttachmentsDialog({ open, onClose, invoiceId }:{ open:boolean; onClose: ()=>void; invoiceId:number }){
   const [items, setItems] = useState<InvoiceAttachment[]>([])
+  const [thumbs, setThumbs] = useState<Record<number, string>>({})
   const [selected, setSelected] = useState<File[]>([])
   const [errors, setErrors] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [progressMap, setProgressMap] = useState<Record<string, number>>({})
   const [itemPreviewOpen, setItemPreviewOpen] = useState<Record<number, {open:boolean; url?:string}>>({})
 
-  const dropRef = useRef<HTMLDivElement|null>(null)
+  const objectUrl = useRef<string|undefined>()
 
-  async function refresh(){ setItems(await listInvoiceAttachments(invoiceId)) }
+  async function refresh(){
+    const list = await listInvoiceAttachments(invoiceId)
+    setItems(list)
+    // load thumbnails lazily
+    const map: Record<number,string> = {}
+    for (const att of list){
+      try{
+        const r = await getSignedInvoiceAttachmentThumbUrl(invoiceId, att.id)
+        map[att.id] = r.url
+      }catch{}
+    }
+    setThumbs(map)
+  }
   useEffect(()=>{ if(open){ refresh() } }, [open, invoiceId])
 
   function onDragOver(e: React.DragEvent<HTMLDivElement>){ e.preventDefault(); e.stopPropagation() }
@@ -58,14 +72,20 @@ export default function InvoiceAttachmentsDialog({ open, onClose, invoiceId }:{ 
 
   async function togglePreview(att: InvoiceAttachment){ const rec=itemPreviewOpen[att.id]; if(rec?.open){ setItemPreviewOpen(p=>({...p,[att.id]:{open:false}})); return } let url=att.url; if(att.storage==='s3'){ try{ const r=await getSignedInvoiceAttachmentUrl(invoiceId, att.id); url=r.url }catch{ setErrors(p=>[...p,'Failed to get view URL']); return } } setItemPreviewOpen(p=>({...p,[att.id]:{open:true,url}})) }
 
-  function renderAvatar(mime:string){ if(isImage(mime)) return <Avatar variant='square'><ImageIcon/></Avatar>; if(isPdf(mime)) return <Avatar variant='square'><PictureAsPdfIcon/></Avatar>; return <Avatar variant='square'><InsertDriveFileIcon/></Avatar> }
+  function renderAvatar(att: InvoiceAttachment){
+    const thumb = thumbs[att.id]
+    if (thumb && isImage(att.mimeType)) return <Avatar variant='square' src={thumb} />
+    if (isImage(att.mimeType)) return <Avatar variant='square'><ImageIcon/></Avatar>
+    if (isPdf(att.mimeType)) return <Avatar variant='square'><PictureAsPdfIcon/></Avatar>
+    return <Avatar variant='square'><InsertDriveFileIcon/></Avatar>
+  }
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth='md' fullWidth>
       <DialogTitle>Invoice Attachments</DialogTitle>
       <DialogContent>
         {errors.map((e,i)=> <Alert key={i} severity='error' sx={{ mb:1 }}>{e}</Alert>)}
-        <Box ref={dropRef} onDragOver={onDragOver} onDrop={onDrop} sx={{ border:'1px dashed', borderColor:'divider', borderRadius:1, p:2, mb:2, textAlign:'center', bgcolor:'action.hover' }}>
+        <Box onDragOver={onDragOver} onDrop={onDrop} sx={{ border:'1px dashed', borderColor:'divider', borderRadius:1, p:2, mb:2, textAlign:'center', bgcolor:'action.hover' }}>
           <Typography variant='body2' sx={{ mb:1 }}>Drag & drop files here, or choose “Add files”.</Typography>
           <Button component='label' variant='outlined' startIcon={<CloudUploadIcon />} disabled={busy}>Add files<input type='file' multiple accept='image/*,application/pdf' hidden onChange={(e)=> e.target.files && addFiles(Array.from(e.target.files))} /></Button>
         </Box>
@@ -79,7 +99,7 @@ export default function InvoiceAttachmentsDialog({ open, onClose, invoiceId }:{ 
             <List dense>
               {selected.map((f,idx)=>{ const pmKey=`${f.name}:${f.size}`; const prog=progressMap[pmKey]||0; return (
                 <ListItem key={pmKey} secondaryAction={<IconButton edge='end' onClick={()=>removePendingFile(idx)} disabled={busy}><DeleteIcon/></IconButton>}>
-                  <ListItemAvatar>{renderAvatar(f.type)}</ListItemAvatar>
+                  <ListItemAvatar><Avatar variant='square'>{isImage(f.type)?<ImageIcon/>:isPdf(f.type)?<PictureAsPdfIcon/>:<InsertDriveFileIcon/>}</Avatar></ListItemAvatar>
                   <ListItemText primary={`${f.name}`} secondary={`${(f.size/1024).toFixed(1)} KB · ${f.type||'unknown'}`} />
                   {busy && <Box sx={{ minWidth:160 }}><LinearProgress variant='determinate' value={prog} /></Box>}
                 </ListItem>
@@ -93,14 +113,25 @@ export default function InvoiceAttachmentsDialog({ open, onClose, invoiceId }:{ 
         <List dense>
           {items.map(att=>{ const pv=itemPreviewOpen[att.id]; return (
             <Box key={att.id}>
-              <ListItem secondaryAction={<Box><Chip size='small' label={att.storage==='s3'?'S3':'Local'} sx={{ mr:1 }} /><IconButton sx={{ mr:1 }} onClick={()=>togglePreview(att)} disabled={busy}>{pv?.open ? <VisibilityOffIcon/> : <VisibilityIcon/>}</IconButton><IconButton edge='end' aria-label='delete' onClick={()=>onDelete(att.id)} disabled={busy}><DeleteIcon/></IconButton></Box>}>
-                <ListItemAvatar>{renderAvatar(att.mimeType)}</ListItemAvatar>
+              <ListItem secondaryAction={<Box>
+                  <Chip size='small' label={att.storage==='s3'?'S3':'Local'} sx={{ mr:1 }} />
+                  <Tooltip title='Preview'>
+                    <IconButton sx={{ mr:1 }} onClick={()=>togglePreview(att)} disabled={busy}>{pv?.open ? <VisibilityOffIcon/> : <VisibilityIcon/>}</IconButton>
+                  </Tooltip>
+                  <Tooltip title='Download'>
+                    <IconButton sx={{ mr:1 }} onClick={()=>downloadInvoiceAttachment(invoiceId, att.id)} disabled={busy}><DownloadIcon/></IconButton>
+                  </Tooltip>
+                  <Tooltip title='Delete'>
+                    <IconButton edge='end' aria-label='delete' onClick={()=>onDelete(att.id)} disabled={busy}><DeleteIcon/></IconButton>
+                  </Tooltip>
+                </Box>}>
+                <ListItemAvatar>{renderAvatar(att)}</ListItemAvatar>
                 <ListItemText primary={<span>{att.originalName}</span>} secondary={`${(att.size/1024).toFixed(1)} KB · ${att.mimeType}`} />
               </ListItem>
               <Collapse in={!!pv?.open} timeout='auto' unmountOnExit>
                 <Box sx={{ p:1, borderTop:'1px solid', borderColor:'divider', mb:1 }}>
-                  {pv?.url && isImage(att.mimeType) && (<img src={pv.url} alt={att.originalName} style={{ maxWidth:'100%', maxHeight:360, borderRadius:4 }} />)}
-                  {pv?.url && isPdf(att.mimeType) && (<iframe title={`pdf-${att.id}`} src={pv.url} style={{ width:'100%', height:420, border:'1px solid #eee', borderRadius:4 }} />)}
+                  {pv?.url && isImage(att.mimeType) && (<img src={pv.url} alt={att.originalName} style={{ maxWidth:'100%', maxHeight:420, borderRadius:4 }} />)}
+                  {pv?.url && isPdf(att.mimeType) && (<iframe title={`pdf-${att.id}`} src={pv.url} style={{ width:'100%', height:480, border:'1px solid #eee', borderRadius:4 }} />)}
                   {!isImage(att.mimeType) && !isPdf(att.mimeType) && pv?.url && (<Typography variant='body2'><a href={pv.url} target='_blank' rel='noreferrer'>Open file</a></Typography>)}
                 </Box>
               </Collapse>

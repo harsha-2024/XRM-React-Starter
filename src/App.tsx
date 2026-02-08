@@ -1,7 +1,8 @@
 
 import { useMemo, useState } from 'react'
-import { ThemeProvider, createTheme, CssBaseline, Container } from '@mui/material'
-import InvoiceAttachmentsDialog from './components/InvoiceAttachmentsDialog'
+import { ThemeProvider, createTheme, CssBaseline } from '@mui/material'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import InvoicesPage from './features/invoices/InvoicesPage'
 
 export default function App(){
   const [mode, setMode] = useState<'light'|'dark'>('light')
@@ -9,11 +10,11 @@ export default function App(){
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Container sx={{ py:4 }}>
-        <h2>Invoice Attachments Demo</h2>
-        <p>Open the dialog to try uploads, previews and S3 presign flows.</p>
-        <InvoiceAttachmentsDialog open={true} onClose={()=>{}} invoiceId={1} />
-      </Container>
+      <Routes>
+        <Route path="/" element={<Navigate to="/invoices" />} />
+        <Route path="/invoices" element={<InvoicesPage />} />
+        <Route path="*" element={<Navigate to="/invoices" />} />
+      </Routes>
     </ThemeProvider>
   )
 }

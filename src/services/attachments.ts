@@ -10,6 +10,8 @@ export type InvoiceAttachment = {
   url: string
   uploadedAt: number
   storage?: 'local'|'s3'
+  thumbUrl?: string
+  thumbStorage?: 'local'|'s3'
 }
 
 export async function listInvoiceAttachments(invoiceId: number){
@@ -41,4 +43,15 @@ export async function recordInvoiceAttachment(invoiceId:number, info: { key:stri
 export async function getSignedInvoiceAttachmentUrl(invoiceId: number, attId: number){
   const { data } = await api.get(`/invoices/${invoiceId}/attachments/${attId}/url`)
   return data as { url: string; expiresIn: number }
+}
+
+export async function getSignedInvoiceAttachmentThumbUrl(invoiceId: number, attId: number){
+  const { data } = await api.get(`/invoices/${invoiceId}/attachments/${attId}/thumb-url`)
+  return data as { url: string; expiresIn: number }
+}
+
+export function downloadInvoiceAttachment(invoiceId: number, attId: number){
+  // Navigate to server download route to get Content-Disposition
+  const url = (api.defaults.baseURL || '') + `/invoices/${invoiceId}/attachments/${attId}/download`
+  window.location.href = url
 }
